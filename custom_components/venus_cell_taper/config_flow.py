@@ -3,7 +3,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
-from .const import DOMAIN
+from .const import DOMAIN, FIELDS
 
 DOMAINS = {
     "manual": "switch", "vmax": "sensor", "vmin": "sensor",
@@ -34,11 +34,15 @@ class VenusCellTaperFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class VenusCellTaperOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            return self.async_create_entry(title="", data=user_input)
         current = int(self.config_entry.options.get("min_charge_w", 40))
+        schema = {
+            vol.Required(key, default=self.config_entry.options.get(key, self.config_entry.data[key])):
+                EntitySelector(EntitySelectorConfig(domain=DOMAINS[key]))
+            for key in FIELDS
+        }
+        schema[vol.Required("min_charge_w", default=current)] = vol.In([10, 20, 30, 40, 50])
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema({
-                vol.Required("min_charge_w", default=current): vol.In([10, 20, 30, 40, 50])
-            }),
+            data_schema=vol.Schema(schema),
         )

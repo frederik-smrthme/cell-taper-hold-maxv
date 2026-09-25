@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 
-from .const import DOMAIN, LIMIT
+from .const import DOMAIN, LIMIT, FIELDS
 from .control import VoltageController
 
 LOGGER = logging.getLogger(__name__)
@@ -20,6 +20,7 @@ PLATFORMS = ["switch", "sensor"]
 class TaperRuntime:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
         self.hass, self.entry = hass, entry
+        self.entities_config = {key: entry.options.get(key, entry.data[key]) for key in FIELDS}
         self.controller = VoltageController(
             min_charge_w=int(entry.options.get("min_charge_w", 40))
         )
@@ -32,7 +33,7 @@ class TaperRuntime:
         self.entities = []
 
     def value(self, key: str) -> float | None:
-        state = self.hass.states.get(self.entry.data[key])
+        state = self.hass.states.get(self.entities_config[key])
         try:
             result = float(state.state) if state else None
             return result if result is not None and math.isfinite(result) else None
@@ -40,7 +41,7 @@ class TaperRuntime:
             return None
 
     def voltage(self) -> float | None:
-        state = self.hass.states.get(self.entry.data["vmax"])
+        state = self.hass.states.get(self.entities_config["vmax"])
         if state is None:
             return None
         # A frozen sensor must not leave the battery charging indefinitely.
@@ -50,7 +51,7 @@ class TaperRuntime:
         return self.value("vmax")
 
     def manual(self) -> bool:
-        return self.hass.states.is_state(self.entry.data["manual"], "on")
+        return self.hass.states.is_state(self.entities_config["manual"], "on")
 
     def notify(self):
         for entity in self.entities:
@@ -59,14 +60,16 @@ class TaperRuntime:
     async def service(self, domain: str, name: str, key: str, field: str, value):
         await self.hass.services.async_call(
             domain, name,
-            {"entity_id": self.entry.data[key], field: value}, blocking=True,
+            {"entity_id": self.entities_config[key], field: value}, blocking=True,
         )
 
     async def verified_write(self, domain: str, name: str, key: str, field: str, value):
         """Require a readback: Omnibattery can swallow a failed register write."""
         await self.service(domain, name, key, field, value)
-        for attempt in range(4):
-            state = self.hass.states.get(self.entry.data[key])
+        last_seen = None
+        for attempt in range(11):
+            state = self.hass.states.get(self.entities_config[key])
+            last_seen = state.state if state else "nicht verfügbar"
             if state is not None:
                 if key == "power":
                     try:
@@ -76,9 +79,12 @@ class TaperRuntime:
                         pass
                 elif state.state == value:
                     return
-            if attempt < 3:
+            if attempt < 10:
                 await asyncio.sleep(0.5)
-        raise ValueError(f"{key} did not confirm {value}")
+        raise ValueError(
+            f"{self.entities_config[key]}: Soll {value}, Rückmeldung {last_seen} "
+            "nach 5 Sekunden"
+        )
 
     async def safe_idle(self) -> bool:
         """Stop charging; try 0 W if Force Mode cannot be confirmed."""
@@ -114,10 +120,19 @@ class TaperRuntime:
                 self.status = "Start verweigert: manueller Modus oder Vmax prüfen"
                 self.notify()
                 return
+            power_entity = self.hass.states.get(self.entities_config["power"])
+            force_entity = self.hass.states.get(self.entities_config["force"])
+            if power_entity is None or force_entity is None:
+                self.status = "Start verweigert: Ladesoll oder Force Mode fehlt"
+                self.notify()
+                return
             try:
                 # Explicit idle handoff; the manual mode itself is never changed.
                 await self.verified_write("select", "select_option", "force", "option", "None")
                 power = self.controller.start(voltage, monotonic())
+                ceiling = power_entity.attributes.get("max")
+                if ceiling is not None and float(ceiling) < power:
+                    raise ValueError(f"Ladesoll begrenzt auf {ceiling} W; Start benötigt {power} W")
                 await self.verified_write("number", "set_value", "power", "value", power)
                 # Recheck after awaited I/O; voltage/manual ownership may have
                 # changed while the start sequence was in flight.
@@ -130,10 +145,10 @@ class TaperRuntime:
                 self.started_at = monotonic()
                 self.no_dc_ticks = 0
                 self.status = f"Laden {power} W"
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception("Unable to start regulator")
                 self.active = False
-                self.status = "Start fehlgeschlagen"
+                self.status = f"Start fehlgeschlagen: {exc}"
                 await self.safe_idle()
             self.notify()
 
@@ -147,7 +162,7 @@ class TaperRuntime:
         if voltage is None or voltage >= LIMIT:
             await self.stop("Stopp: Vmax fehlt oder Grenzwert erreicht")
             return
-        if not self.hass.states.is_state(self.entry.data["force"], "Charge"):
+        if not self.hass.states.is_state(self.entities_config["force"], "Charge"):
             await self.stop("Stopp: Force Mode nicht mehr Charge")
             return
         dc_power = self.value("dc")
@@ -183,9 +198,9 @@ class TaperRuntime:
         if not self.active:
             return
         entity_id = event.data.get("entity_id")
-        if entity_id == self.entry.data["manual"] and not self.manual():
+        if entity_id == self.entities_config["manual"] and not self.manual():
             self.hass.async_create_task(self.stop("Manueller Modus aus"))
-        if entity_id == self.entry.data["vmax"]:
+        if entity_id == self.entities_config["vmax"]:
             voltage = self.voltage()
             if voltage is None or voltage >= LIMIT:
                 self.hass.async_create_task(self.stop("Spannungsstopp"))
@@ -193,7 +208,7 @@ class TaperRuntime:
     async def async_setup(self):
         self.listeners.append(async_track_time_interval(self.hass, self.tick, timedelta(seconds=10)))
         self.listeners.append(async_track_state_change_event(
-            self.hass, [self.entry.data["manual"], self.entry.data["vmax"]], self.state_changed
+            self.hass, [self.entities_config["manual"], self.entities_config["vmax"]], self.state_changed
         ))
 
     async def async_unload(self):

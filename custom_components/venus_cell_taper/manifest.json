@@ -1,7 +1,7 @@
 {
   "domain": "venus_cell_taper",
   "name": "Venus Cell Taper",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "documentation": "https://github.com/frederik-smrthme/cell-taper-hold-maxv",
   "issue_tracker": "https://github.com/frederik-smrthme/cell-taper-hold-maxv/issues",
   "codeowners": [],

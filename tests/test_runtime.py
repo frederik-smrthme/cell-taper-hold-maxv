@@ -14,6 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1] / "custom_components" / "venu
 class State:
     def __init__(self, value):
         self.state = str(value)
+        self.attributes = {"max": 2300} if isinstance(value, (int, float)) else {}
         self.last_updated = datetime.now(timezone.utc)
         self.last_reported = self.last_updated
 
@@ -119,6 +120,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.start()
         self.assertFalse(self.runtime.active)
         self.assertEqual(self.states["select.force"].state, "None")
+        self.assertIn("Rückmeldung 0", self.runtime.status)
+
+    async def test_options_mapping_overrides_initial_data(self):
+        self.entry.options["power"] = "number.corrected"
+        self.states["number.corrected"] = State(0)
+        runtime = self.module.TaperRuntime(self.hass, self.entry)
+        await runtime.start()
+        self.assertTrue(runtime.active)
+        self.assertEqual(self.services.calls[1][2]["entity_id"], "number.corrected")
+
+    async def test_low_maximum_does_not_start_charge(self):
+        self.states["number.power"].attributes["max"] = 300
+        await self.runtime.start()
+        self.assertFalse(self.runtime.active)
+        self.assertEqual(self.states["select.force"].state, "None")
+        self.assertIn("300 W", self.runtime.status)
 
     async def test_voltage_limit_stops(self):
         await self.runtime.start()

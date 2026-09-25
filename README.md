@@ -1,5 +1,7 @@
 # Venus Cell Taper
 
+**Version: 0.1.2**
+
 Experimenteller Spannungsregler für **eine** Marstek Venus E mit Omnibattery in Home Assistant.
 
 ## Installation
@@ -25,7 +27,7 @@ Bei `Vmax ≥ 3,55 V`, bei **3,52 V trotz bereits erreichter Mindestleistung**, 
 
 Änderungen an den Optionen laden die Integration neu. Ein laufender Ladevorgang wird dabei gestoppt und muss bewusst neu gestartet werden.
 
-Die Statusentität zeigt `Vmax`, `Vmin`, AC- und DC-Leistung sowie den letzten Sollwert als Attribute. Die DC-Leistung wird beobachtet, aber in Version 0.1 noch nicht als Eingangsgröße für die Regelung verwendet. Bei kleinen AC-Sollwerten kann die DC-Ladung gegen null gehen.
+Die Statusentität zeigt `Vmax`, `Vmin`, AC- und DC-Leistung sowie den letzten Sollwert als Attribute. Die DC-Leistung wird überwacht, damit der Regler bei ausbleibender Ladung stoppt; sie bestimmt noch nicht die Höhe des Sollwerts. Bei kleinen AC-Sollwerten kann die DC-Ladung gegen null gehen.
 
 **Vor dem ersten Versuch:** Prüfe, ob der Force-Mode-Schalter tatsächlich die Optionen `None` und `Charge` anbietet. Ein 40-W-Sollwert wurde über `number.set_value` angenommen und ergab 8–11 W DC. Bei einem abgewiesenen Schreibbefehl stoppt der Regler; der Status zeigt den Fehler. Die Integration selbst wurde noch nicht an einer realen Venus E getestet.
 

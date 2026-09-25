@@ -26,6 +26,8 @@ class TaperRuntime:
         self.active = False  # Never resume an interrupted charge after restart.
         self.status = "Aus"
         self.lock = asyncio.Lock()
+        self.started_at = 0.0
+        self.no_dc_ticks = 0
         self.listeners = []
         self.entities = []
 
@@ -60,17 +62,47 @@ class TaperRuntime:
             {"entity_id": self.entry.data[key], field: value}, blocking=True,
         )
 
+    async def verified_write(self, domain: str, name: str, key: str, field: str, value):
+        """Require a readback: Omnibattery can swallow a failed register write."""
+        await self.service(domain, name, key, field, value)
+        for attempt in range(4):
+            state = self.hass.states.get(self.entry.data[key])
+            if state is not None:
+                if key == "power":
+                    try:
+                        if abs(float(state.state) - float(value)) <= 1:
+                            return
+                    except (ValueError, TypeError):
+                        pass
+                elif state.state == value:
+                    return
+            if attempt < 3:
+                await asyncio.sleep(0.5)
+        raise ValueError(f"{key} did not confirm {value}")
+
+    async def safe_idle(self) -> bool:
+        """Stop charging; try 0 W if Force Mode cannot be confirmed."""
+        if not self.manual():
+            return True  # Omnibattery owns the handoff after manual mode exits.
+        try:
+            await self.verified_write("select", "select_option", "force", "option", "None")
+            return True
+        except Exception:
+            LOGGER.exception("Force Mode None was not confirmed; trying 0 W")
+            try:
+                await self.verified_write("number", "set_value", "power", "value", 0)
+                self.status = "Force Mode nicht bestätigt – Ladesollwert 0 W"
+                return False
+            except Exception:
+                LOGGER.exception("Neither Force Mode None nor 0 W was confirmed")
+                self.status = "STOPP fehlgeschlagen – Batterie sofort prüfen"
+                return False
+
     async def stop(self, reason="Aus"):
         async with self.lock:
             self.active = False
             self.status = reason
-            # Do not take control if the user already left manual mode.
-            if self.manual():
-                try:
-                    await self.service("select", "select_option", "force", "option", "None")
-                except Exception:
-                    LOGGER.exception("Unable to stop charging; check Force Mode immediately")
-                    self.status = "STOPP fehlgeschlagen – Force Mode prüfen"
+            await self.safe_idle()
             self.notify()
 
     async def start(self):
@@ -84,28 +116,25 @@ class TaperRuntime:
                 return
             try:
                 # Explicit idle handoff; the manual mode itself is never changed.
-                await self.service("select", "select_option", "force", "option", "None")
+                await self.verified_write("select", "select_option", "force", "option", "None")
                 power = self.controller.start(voltage, monotonic())
-                await self.service("number", "set_value", "power", "value", power)
+                await self.verified_write("number", "set_value", "power", "value", power)
                 # Recheck after awaited I/O; voltage/manual ownership may have
                 # changed while the start sequence was in flight.
                 if not self.manual() or self.voltage() is None or self.voltage() >= 3.52:
                     raise ValueError("voltage or manual ownership changed during start")
                 self.active = True
-                await self.service("select", "select_option", "force", "option", "Charge")
+                await self.verified_write("select", "select_option", "force", "option", "Charge")
                 if not self.manual() or self.voltage() is None or self.voltage() >= LIMIT:
                     raise ValueError("voltage or manual ownership changed during charge command")
+                self.started_at = monotonic()
+                self.no_dc_ticks = 0
                 self.status = f"Laden {power} W"
             except Exception:
                 LOGGER.exception("Unable to start regulator")
                 self.active = False
                 self.status = "Start fehlgeschlagen"
-                if self.manual():
-                    try:
-                        await self.service("select", "select_option", "force", "option", "None")
-                    except Exception:
-                        LOGGER.exception("Unable to restore idle Force Mode")
-                        self.status = "STOPP fehlgeschlagen – Force Mode prüfen"
+                await self.safe_idle()
             self.notify()
 
     async def tick(self, _now=None):
@@ -118,13 +147,25 @@ class TaperRuntime:
         if voltage is None or voltage >= LIMIT:
             await self.stop("Stopp: Vmax fehlt oder Grenzwert erreicht")
             return
+        if not self.hass.states.is_state(self.entry.data["force"], "Charge"):
+            await self.stop("Stopp: Force Mode nicht mehr Charge")
+            return
+        dc_power = self.value("dc")
+        if dc_power is None:
+            await self.stop("Stopp: DC-Leistung nicht verfügbar")
+            return
+        if monotonic() - self.started_at >= 30:
+            self.no_dc_ticks = self.no_dc_ticks + 1 if dc_power <= 2 else 0
+            if self.no_dc_ticks >= 3:
+                await self.stop("Stopp: keine DC-Ladung")
+                return
         async with self.lock:
             if not self.active:
                 return
             try:
                 proposed = self.controller.update(voltage, monotonic())
                 if proposed is not None:
-                    await self.service("number", "set_value", "power", "value", proposed)
+                    await self.verified_write("number", "set_value", "power", "value", proposed)
                     self.status = f"Laden {proposed} W"
                     self.notify()
             except Exception as exc:
@@ -134,11 +175,7 @@ class TaperRuntime:
                     "Stopp: Mindestleistung hält Zellspannung nicht"
                     if isinstance(exc, ValueError) else "Regelfehler – gestoppt"
                 )
-                try:
-                    await self.service("select", "select_option", "force", "option", "None")
-                except Exception:
-                    LOGGER.exception("Unable to stop after control error")
-                    self.status = "STOPP fehlgeschlagen – Force Mode prüfen"
+                await self.safe_idle()
                 self.notify()
 
     @callback

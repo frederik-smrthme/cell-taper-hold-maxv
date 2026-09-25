@@ -1,0 +1,34 @@
+{
+  "title": "Venus Cell Taper",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Omnibattery Venus E zuordnen",
+        "description": "Wähle die Entitäten derselben Batterie. Der manuelle Modus bleibt unter deiner Kontrolle.",
+        "data": {
+          "manual": "Battery Manual Mode (Schalter)",
+          "vmax": "Höchste Zellspannung",
+          "vmin": "Niedrigste Zellspannung",
+          "ac": "AC-Leistung",
+          "dc": "DC-Batterieleistung",
+          "power": "Ladesollwert (Number)",
+          "force": "Force Mode (Select)"
+        }
+      }
+    },
+    "error": {"invalid": "Die ausgewählten Entitäten sind nicht verfügbar."},
+    "abort": {"already_configured": "Diese Batterie wurde bereits eingerichtet."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Regler einstellen",
+        "data": {"min_charge_w": "Minimale AC-Ladeleistung (W)"}
+      }
+    }
+  },
+  "entity": {
+    "switch": {"regulator": {"name": "Spannungsregelung"}},
+    "sensor": {"status": {"name": "Reglerstatus"}}
+  }
+}
